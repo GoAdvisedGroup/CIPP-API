@@ -6,18 +6,29 @@ Function Push-ExecOnboardTenantQueue {
     [CmdletBinding()]
     param($QueueItem, $TriggerMetadata)
     try {
+        $DateFormat = '%Y-%m-%d %H:%M:%S'
         $Id = $QueueItem.id
-        Write-Host ($QueueItem.Roles | ConvertTo-Json)
-        $Logs = [System.Collections.Generic.List[string]]::new()
+        #Write-Host ($QueueItem.Roles | ConvertTo-Json)
+        $Start = Get-Date
+        $Logs = [System.Collections.Generic.List[object]]::new()
         $OnboardTable = Get-CIPPTable -TableName 'TenantOnboarding'
         $TenantOnboarding = Get-CIPPAzDataTableEntity @OnboardTable -Filter "RowKey eq '$Id'"
 
-        $Logs.Add('Starting onboarding')
+        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = "Starting onboarding for relationship $Id" })
         $OnboardingSteps = $TenantOnboarding.OnboardingSteps | ConvertFrom-Json
         $OnboardingSteps.Step1.Status = 'running'
         $OnboardingSteps.Step1.Message = 'Checking GDAP invite status'
+        $OnboardingSteps.Step2.Status = 'pending'
+        $OnboardingSteps.Step2.Message = 'Waiting for Step 1'
+        $OnboardingSteps.Step3.Status = 'pending'
+        $OnboardingSteps.Step3.Message = 'Waiting for Step 2'
+        $OnboardingSteps.Step4.Status = 'pending'
+        $OnboardingSteps.Step4.Message = 'Waiting for Step 3'
+        $OnboardingSteps.Step5.Status = 'pending'
+        $OnboardingSteps.Step5.Message = 'Waiting for Step 4'
         $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
         $TenantOnboarding.Status = 'running'
+        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress -AsArray)
         Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
 
         try {
@@ -42,35 +53,37 @@ Function Push-ExecOnboardTenantQueue {
         )
 
         if ($OnboardingSteps.Step1.Status -ne 'succeeded') {
-            $Logs.Add('Checking relationship status')
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Checking relationship status' })
             $x = 0
             do {
                 $Relationship = New-GraphGetRequest -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$Id"
                 $x++
                 Start-Sleep -Seconds 30
-            } while ($Relationship.status -ne 'active' -and $x -lt 4)
+            } while ($Relationship.status -ne 'active' -and $x -lt 6)
 
             if ($Relationship.status -eq 'active') {
-                $Logs.Add('GDAP Invite Accepted')
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'GDAP Invite Accepted' })
                 $OnboardingSteps.Step1.Status = 'succeeded'
                 $OnboardingSteps.Step1.Message = "GDAP Invite accepted for $($Relationship.customer.displayName)"
                 $TenantOnboarding.CustomerId = $Relationship.customer.tenantId
             } else {
-                $Logs.Add('GDAP Invite Failed')
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'GDAP Invite Failed' })
                 $OnboardingSteps.Step1.Status = 'failed'
                 $OnboardingSteps.Step1.Message = 'GDAP Invite timeout, retry onboarding after accepting the invite with a GA account in the customer tenant.'
                 $TenantOnboarding.Status = 'failed'
             }
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
             $TenantOnboarding.Relationship = [string](ConvertTo-Json -InputObject $Relationship -Compress -Depth 10)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
         }
 
         if ($OnboardingSteps.Step1.Status -eq 'succeeded') {
-            $Logs.Add('Starting role check')
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Starting role check' })
             $OnboardingSteps.Step2.Status = 'running'
             $OnboardingSteps.Step2.Message = 'Checking role mapping'
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
 
             $MissingRoles = [System.Collections.Generic.List[string]]::new()
@@ -87,48 +100,77 @@ Function Push-ExecOnboardTenantQueue {
                 }
             }
             if (($MissingRoles | Measure-Object).Count -gt 0) {
-                $Logs.Add('Missing roles for relationship')
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Missing roles for relationship' })
                 $TenantOnboarding.Status = 'failed'
                 $OnboardingSteps.Step2.Status = 'failed'
                 $OnboardingSteps.Step2.Message = "Your GDAP relationship is missing the following roles: $($MissingRoles -join ', ')"
             } else {
-                $Logs.Add('Required roles found')
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Required roles found' })
                 $OnboardingSteps.Step2.Status = 'succeeded'
                 $OnboardingSteps.Step2.Message = 'Your GDAP relationship has the required roles'
             }
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
         }
 
         if ($OnboardingSteps.Step2.Status -eq 'succeeded') {
-            $Logs.Add('Checking group mapping')
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Checking group mapping' })
             $AccessAssignments = New-GraphGetRequest -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$Id/accessAssignments"
-            if ($AccessAssignments.id) {
-                $Logs.Add('Groups mapped')
+            if ($AccessAssignments.id -and $QueueItem.AutoMapRoles -ne $true) {
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Groups mapped' })
                 $OnboardingSteps.Step3.Status = 'succeeded'
-                $OnboardingSteps.Step3.Message = 'Your GDAP relationship has mapped security groups'
+                $OnboardingSteps.Step3.Message = 'Your GDAP relationship already has mapped security groups'
             } else {
-                $Logs.Add('Starting group mapping')
+                $GroupSuccess = $false
                 $OnboardingSteps.Step3.Status = 'running'
                 $OnboardingSteps.Step3.Message = 'Mapping security groups'
                 $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
                 Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
 
-                $Table = Get-CIPPTable -TableName 'GDAPInvites'
-                $Invite = Get-CIPPAzDataTableEntity @Table -Filter "RowKey eq '$Id'"
+                $InviteTable = Get-CIPPTable -TableName 'GDAPInvites'
+                $Invite = Get-CIPPAzDataTableEntity @InviteTable -Filter "RowKey eq '$Id'"
 
-                if (!$Invite -and $QueueItem.Roles) {
+                if ($AccessAssignments.id -and !$Invite) {
+                    $MissingRoles = [System.Collections.Generic.List[object]]::new()
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Relationship has existing access assignments, checking for missing mappings' })
+                    #Write-Host ($AccessAssignments | ConvertTo-Json -Depth 5)
+                    if ($QueueItem.Roles -and $QueueItem.AutoMapRoles -eq $true) {
+                        foreach ($Role in $QueueItem.Roles) {
+                            if ($AccessAssignments.accessContainer.accessContainerid -notcontains $Role.GroupId -and $Relationship.accessDetails.unifiedRoles.roleDefinitionId -contains $Role.roleDefinitionId) {
+                                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = "Adding missing group to relationship: $($Role.GroupName)" })
+                                $MissingRoles.Add([PSCustomObject]$Role)
+                            }
+                        }
+
+                        if (($MissingRoles | Measure-Object).Count -gt 0) {
+                            $Invite = [PSCustomObject]@{
+                                'PartitionKey' = 'invite'
+                                'RowKey'       = $Id
+                                'InviteUrl'    = 'https://admin.microsoft.com/AdminPortal/Home#/partners/invitation/granularAdminRelationships/{0}' -f $Id
+                                'RoleMappings' = [string](@($MissingRoles) | ConvertTo-Json -Depth 10 -Compress)
+                            }
+                            Add-CIPPAzDataTableEntity @InviteTable -Entity $Invite
+                        } else {
+                            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'All roles have been mapped to the M365 GDAP security groups' })
+                            $OnboardingSteps.Step3.Status = 'succeeded'
+                            $OnboardingSteps.Step3.Message = 'Groups mapped successfully'
+                            $GroupSuccess = $true
+                        }
+                    }
+                }
+
+                if (!$AccessAssignments.id -and !$Invite -and $QueueItem.Roles) {
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'No access assignments found, using defined role mapping.' })
                     $MatchingRoles = [System.Collections.Generic.List[object]]::new()
                     foreach ($Role in $QueueItem.Roles) {
-                        Write-Host "##### Checking role $($Role.RoleName)"
                         if ($Relationship.accessDetails.unifiedRoles.roleDefinitionId -contains $Role.roleDefinitionId) {
                             $MatchingRoles.Add([PSCustomObject]$Role)
-                            Write-Host '##### Found'
                         }
                     }
 
-                    if (($MatchingRoles | Measure-Object).Count -gt 0) {
-                        $InviteTable = Get-CIPPTable -TableName 'GDAPInvites'
+                    if (($MatchingRoles | Measure-Object).Count -gt 0 -and $QueueItem.AutoMapRoles -eq $true) {
                         $Invite = [PSCustomObject]@{
                             'PartitionKey' = 'invite'
                             'RowKey'       = $Id
@@ -136,52 +178,131 @@ Function Push-ExecOnboardTenantQueue {
                             'RoleMappings' = [string](@($MatchingRoles) | ConvertTo-Json -Depth 10 -Compress)
                         }
                         Add-CIPPAzDataTableEntity @InviteTable -Entity $Invite
+                        $GroupSuccess = $true
                     } else {
                         $TenantOnboarding.Status = 'failed'
                         $OnboardingSteps.Step3.Status = 'failed'
                         $OnboardingSteps.Step3.Message = 'No matching roles found, check the relationship and try again.'
+                        $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
+                        Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
+                        return
                     }
                 }
 
                 if ($Invite) {
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'GDAP invite found, starting group/role mapping' })
                     $GroupMapStatus = Set-CIPPGDAPInviteGroups -Relationship $Relationship
                     if ($GroupMapStatus) {
-                        $Logs.Add('Groups mapped successfully')
-                        $OnboardingSteps.Step3.Status = 'succeeded'
-                        $OnboardingSteps.Step3.Message = 'Groups mapped successfully'
+                        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Groups mapped successfully' })
+                        $OnboardingSteps.Step3.Message = 'Groups mapped successfully, checking access assignment status'
+                        $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
+                        Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
+
                     } else {
-                        $Logs.Add('Group mapping failed')
+                        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Group mapping failed' })
                         $TenantOnboarding.Status = 'failed'
                         $OnboardingSteps.Step3.Status = 'failed'
                         $OnboardingSteps.Step3.Message = 'Group mapping failed, check the log book for details.'
+                        $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
+                        Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
+                        return
                     }
-                } else {
+                } elseif (!$GroupSuccess) {
                     $TenantOnboarding.Status = 'failed'
                     $OnboardingSteps.Step3.Status = 'failed'
                     $OnboardingSteps.Step3.Message = 'Failed to map security groups, no pending invite available'
                 }
 
+                do {
+                    $AccessAssignments = New-GraphGetRequest -Uri "https://graph.microsoft.com/beta/tenantRelationships/delegatedAdminRelationships/$Id/accessAssignments"
+                    Start-Sleep -Seconds 15
+                } while ($AccessAssignments.status -contains 'pending' -and (Get-Date) -lt $Start.AddMinutes(8))
+
+                if ($AccessAssignments.status -notcontains 'pending') {
+                    $OnboardingSteps.Step3.Message = 'Group check: Access assignments are mapped and active'
+                    $OnboardingSteps.Step3.Status = 'succeeded'
+                    if ($QueueItem.AddMissingGroups -eq $true) {
+                        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Checking for missing groups for SAM user' })
+                        $SamUserId = (New-GraphGetRequest -uri "https://graph.microsoft.com/beta/me?`$select=id").id
+                        $CurrentMemberships = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/me/transitiveMemberOf?`$select=id,displayName"
+                        foreach ($Role in $QueueItem.Roles) {
+                            if ($CurrentMemberships.id -notcontains $Role.GroupId) {
+                                $PostBody = @{
+                                    '@odata.id' = 'https://graph.microsoft.com/v1.0/directoryObjects/{0}' -f $SamUserId
+                                } | ConvertTo-Json -Compress
+                                try {
+                                    New-GraphPostRequest -uri "https://graph.microsoft.com/beta/groups/$($Role.GroupId)/members/`$ref" -body $PostBody -AsApp $true -NoAuthCheck $true
+                                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = "Added SAM user to $($Role.GroupName)" })
+                                } catch {
+                                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = "Failed to add SAM user to $($Role.GroupName) - $($_.Exception.Message)" })
+                                }
+                            }
+                        }
+                        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'SAM user group check completed' })
+                    }
+                } else {
+                    $OnboardingSteps.Step3.Message = 'Group check: Access assignments are still pending, try again later'
+                    $OnboardingSteps.Step3.Status = 'failed'
+                    $TenantOnboarding.Status = 'failed'
+                }
             }
+
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
         }
 
         if ($OnboardingSteps.Step3.Status -eq 'succeeded') {
-            $Logs.Add('Refreshing CPV permissions')
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Setting up CPV consent' })
             $OnboardingSteps.Step4.Status = 'running'
-            $OnboardingSteps.Step4.Message = 'Refreshing CPV permissions'
+            $OnboardingSteps.Step4.Message = 'Setting up CPV consent'
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
 
-            try {
-                Remove-CIPPCache -tenantsOnly $true
-            } catch {}
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Clearing tenant cache' })
+            $y = 0
+            do {
+                try {
+                    Remove-CIPPCache -tenantsOnly $true
+                } catch {}
 
-            $Tenant = Get-Tenants | Where-Object { $_.customerId -eq $Relationship.customer.tenantId }
+                $Tenant = Get-Tenants | Where-Object { $_.customerId -eq $Relationship.customer.tenantId } | Select-Object -First 1
+                $y++
+                Start-Sleep -Seconds 20
+            } while (!$Tenant -and $y -le 4)
+
             if ($Tenant) {
-                $y = 0
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Tenant found in customer list' })
+                try {
+                    $CPVConsentParams = @{
+                        TenantFilter = $Tenant.defaultDomainName
+                    }
+                    $Consent = Set-CIPPCPVConsent @CPVConsentParams
+                    if ($Consent -match 'Could not add our Service Principal to the client tenant') {
+                        throw
+                    }
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Added initial CPV consent permissions' })
+                } catch {
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'CPV Consent Failed' })
+                    $TenantOnboarding.Status = 'failed'
+                    $OnboardingSteps.Step4.Status = 'failed'
+                    $OnboardingSteps.Step4.Message = 'CPV Consent failed, check the App Registration in your partner tenant for missing admin consent.'
+                    $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                    $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
+                    Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
+                    return
+                }
                 $Refreshing = $true
                 $CPVSuccess = $false
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Refreshing CPV permissions' })
+                $OnboardingSteps.Step4.Message = 'Refreshing CPV permissions'
+                $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
+                Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
                 do {
                     try {
                         Add-CIPPApplicationPermission -RequiredResourceAccess 'CippDefaults' -ApplicationId $ENV:ApplicationID -tenantfilter $Tenant.defaultDomainName
@@ -189,63 +310,72 @@ Function Push-ExecOnboardTenantQueue {
                         $CPVSuccess = $true
                         $Refreshing = $false
                     } catch {
-                        $y++
                         Start-Sleep -Seconds 30
                     }
-                } while ($Refreshing -and $y -lt 4)
+                } while ($Refreshing -and (Get-Date) -lt $Start.AddMinutes(8))
 
                 if ($CPVSuccess) {
-                    $Logs.Add('CPV permissions refreshed')
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'CPV permissions refreshed' })
                     $OnboardingSteps.Step4.Status = 'succeeded'
                     $OnboardingSteps.Step4.Message = 'CPV permissions refreshed'
                 } else {
-                    $Logs.Add('CPV permissions failed to refresh')
+                    $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'CPV permissions failed to refresh' })
                     $TenantOnboarding.Status = 'failed'
                     $OnboardingSteps.Step4.Status = 'failed'
                     $OnboardingSteps.Step4.Message = 'CPV permissions failed to refresh, try again later'
                 }
             } else {
-                $Logs.Add('Tenant not found')
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Tenant not found' })
                 $TenantOnboarding.Status = 'failed'
                 $OnboardingSteps.Step4.Status = 'failed'
                 $OnboardingSteps.Step4.Message = 'Tenant not found in customer list, try again later'
             }
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
         }
 
         if ($OnboardingSteps.Step4.Status -eq 'succeeded') {
+            $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = "Testing API access for $($Tenant.defaultDomainName)" })
             $OnboardingSteps.Step5.Status = 'running'
-            $OnboardingSteps.Step5.Message = 'Testing API Access'
+            $OnboardingSteps.Step5.Message = 'Testing API access'
             $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+            $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
             Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
 
             try {
-                $UserCount = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/users?`$count=true&`$top=1" -ComplexFilter -tenantfilter $Tenant.defaultDomainName -CountOnly
+                #Write-Host ($Tenant | ConvertTo-Json)
+                $UserCount = New-GraphGetRequest -uri "https://graph.microsoft.com/beta/users?`$count=true&`$top=1" -ComplexFilter -tenantid $Tenant.defaultDomainName -CountOnly
             } catch {
                 $UserCount = 0
                 $ApiError = $_.Exception.Message
             }
 
             if ($UserCount -gt 0) {
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'API test successful' })
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Onboarding complete' })
                 $OnboardingSteps.Step5.Status = 'succeeded'
                 $OnboardingSteps.Step5.Message = 'API Test Successful: {0} users found' -f $UserCount
                 $TenantOnboarding.Status = 'succeeded'
                 $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
                 Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
             } else {
+                $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'API Test failed: {0}' -f $ApiError })
                 $OnboardingSteps.Step5.Status = 'failed'
                 $OnboardingSteps.Step5.Message = 'API Test failed: {0}' -f $ApiError
                 $TenantOnboarding.Status = 'succeeded'
                 $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
+                $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
                 Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
             }
         }
     } catch {
+        $Logs.Add([PSCustomObject]@{ Date = Get-Date -UFormat $DateFormat; Log = 'Onboarding failed. Exception: {0}' -f $_.Exception.Message })
         $TenantOnboarding.Status = 'failed'
         $TenantOnboarding.Exception = [string]('{0} - Line {1} - {2}' -f $_.Exception.Message, $_.InvocationInfo.ScriptLineNumber, $_.InvocationInfo.ScriptName)
         $TenantOnboarding.OnboardingSteps = [string](ConvertTo-Json -InputObject $OnboardingSteps -Compress)
-        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject $Logs -Compress)
+        $TenantOnboarding.Logs = [string](ConvertTo-Json -InputObject @($Logs) -Compress)
         Add-CIPPAzDataTableEntity @OnboardTable -Entity $TenantOnboarding -Force -ErrorAction Stop
     }
 }
